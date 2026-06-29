@@ -90,6 +90,12 @@ type DirHandle struct {
 	lastName           string
 }
 
+// dirChildIndex maps ReadDir cursor to dir.Children index.
+// Cursor values: 0=".", 1="..", 2=Children[0], 3=Children[1], ...
+func dirChildIndex(cursor int) int {
+	return cursor - 2
+}
+
 func NewDirHandle(inode *Inode) (dh *DirHandle) {
 	dh = &DirHandle{inode: inode}
 	return
@@ -276,6 +282,9 @@ func (parent *Inode) listObjectsSlurp(inode *Inode, startAfter string, sealEnd b
 			continue
 		}
 		baseName := (*obj.Key)[len(prefix):]
+		if shouldHideLockSidecar(parent.fs.flags, baseName) {
+			continue
+		}
 		if !isInvalidName(baseName) {
 			parent.insertSubTree(baseName, &obj, dirs)
 		}
@@ -834,7 +843,7 @@ func (dh *DirHandle) ReadDir() (inode *Inode, err error) {
 		dh.checkDirPosition()
 	}
 
-	if dh.lastInternalOffset-2 >= len(dh.inode.dir.Children) {
+	if dirChildIndex(dh.lastInternalOffset) >= len(dh.inode.dir.Children) {
 		// we've reached the end
 		parent.dir.listDone = false
 		if parent.dir.forgetDuringList {
@@ -844,7 +853,26 @@ func (dh *DirHandle) ReadDir() (inode *Inode, err error) {
 		return
 	}
 
-	child := dh.inode.dir.Children[dh.lastInternalOffset-2]
+	// ReadDir cursor encoding (see checkDirPosition): 0=".", 1="..", 2+=Children[i-2].
+	// Skip hidden lock sidecars without exposing them to the kernel.
+	for dirChildIndex(dh.lastInternalOffset) < len(dh.inode.dir.Children) {
+		child := dh.inode.dir.Children[dirChildIndex(dh.lastInternalOffset)]
+		if shouldHideLockSidecar(dh.inode.fs.flags, child.Name) {
+			dh.lastInternalOffset++
+			continue
+		}
+		break
+	}
+	if dirChildIndex(dh.lastInternalOffset) >= len(dh.inode.dir.Children) {
+		parent.dir.listDone = false
+		if parent.dir.forgetDuringList {
+			parent.dir.DirTime = time.Time{}
+			parent.dir.Gaps = nil
+		}
+		return
+	}
+
+	child := dh.inode.dir.Children[dirChildIndex(dh.lastInternalOffset)]
 	if dh.inode.dir.lastFromCloud != nil && child.Name == *dh.inode.dir.lastFromCloud {
 		dh.inode.dir.lastFromCloud = nil
 	}
@@ -1212,6 +1240,10 @@ func (parent *Inode) CreateOrOpen(name string, open bool) (inode *Inode, fh *Fil
 
 	fs := parent.fs
 
+	if err := fs.locksCheckCreate(parent, name); err != nil {
+		return nil, nil, err
+	}
+
 	parent.mu.Lock()
 	defer parent.mu.Unlock()
 
@@ -1258,6 +1290,10 @@ func (parent *Inode) MkDir(
 	name string) (inode *Inode, err error) {
 
 	parent.logFuse("MkDir", name)
+
+	if err := parent.fs.locksCheckMkDir(parent, name); err != nil {
+		return nil, err
+	}
 
 	parent.mu.Lock()
 	defer parent.mu.Unlock()
@@ -1808,6 +1844,10 @@ func (parent *Inode) insertSubTree(path string, obj *BlobItemOutput, dirs map[*I
 	fs := parent.fs
 	slash := strings.Index(path, "/")
 	if slash == -1 {
+		if shouldHideLockSidecar(fs.flags, path) {
+			sealPastDirs(dirs, parent)
+			return
+		}
 		inode := parent.findChildUnlocked(path)
 		if inode == nil {
 			// don't revive deleted items
@@ -1895,6 +1935,9 @@ func (parent *Inode) findChildMaxTime() (maxMtime, maxCtime time.Time) {
 }
 
 func (parent *Inode) LookUpCached(name string) (inode *Inode, err error) {
+	if shouldHideLockSidecar(parent.fs.flags, name) {
+		return nil, syscall.ENOENT
+	}
 	parent.mu.Lock()
 	ok := false
 	inode = parent.findChildUnlocked(name)

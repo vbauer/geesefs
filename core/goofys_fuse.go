@@ -512,6 +512,13 @@ func (fs *GoofysFuse) OpenFile(
 
 	op.Handle = fs.AddFileHandle(fh)
 
+	err = fs.locksOnOpen(in, openWantsWrite(uint32(op.OpenFlags)))
+	if err != nil {
+		fs.rollbackFileHandleOpen(op.Handle, fh)
+		err = mapAwsError(err)
+		return
+	}
+
 	// this flag appears to tell the kernel if this open should
 	// use the page cache or not. "use" here means:
 	//
@@ -812,6 +819,10 @@ func (fs *GoofysFuse) Unlink(
 		return syscall.ESTALE
 	}
 
+	if fs.flags.EnableFileLocks && shouldHideLockSidecar(fs.flags, op.Name) {
+		return syscall.EACCES
+	}
+
 	err = parent.Unlink(op.Name)
 	err = mapAwsError(err)
 	return
@@ -834,7 +845,14 @@ func (fs *GoofysFuse) Rename(
 		return syscall.ESTALE
 	}
 
+	if err = fs.locksCheckRename(newParent, op.NewName); err != nil {
+		return mapAwsError(err)
+	}
+
 	err = parent.Rename(op.OldName, newParent, op.NewName)
+	if err == nil {
+		fs.locksOnRename(parent, op.OldName)
+	}
 	err = mapAwsError(err)
 
 	return

@@ -174,6 +174,15 @@ func (fh *FileHandle) WriteFile(offset int64, data []byte, copyData bool) (err e
 
 	fh.inode.mu.Lock()
 
+	if err := fh.inode.fs.locksCheckWrite(fh.inode); err != nil {
+		if fh.inode.fs.flags.UseEnomem {
+			// Undo the reservation above: negative size releases buffer pool quota.
+			fh.inode.fs.bufferPool.Use(-int64(len(data)), false)
+		}
+		fh.inode.mu.Unlock()
+		return err
+	}
+
 	if fh.inode.CacheState == ST_DELETED || fh.inode.CacheState == ST_DEAD {
 		// Oops, it's a deleted file. We don't support changing invisible files
 		if fh.inode.fs.flags.UseEnomem {
@@ -634,6 +643,7 @@ func (fh *FileHandle) Release() {
 	}
 	if n == 0 {
 		fh.inode.Parent.addModified(-1)
+		fh.inode.fs.locks.OnInodeClosed(fh.inode)
 	}
 	fh.inode.fs.WakeupFlusher()
 }
