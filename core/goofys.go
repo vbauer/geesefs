@@ -119,6 +119,8 @@ type Goofys struct {
 	stats OpStats
 
 	NotifyCallback func(notifications []interface{})
+
+	locks FileLockManager // always set; no-op when --enable-file-locks is off
 }
 
 type OpStats struct {
@@ -136,6 +138,7 @@ type OpStats struct {
 var s3Log = cfg.GetLogger("s3")
 var log = cfg.GetLogger("main")
 var fuseLog = cfg.GetLogger("fuse")
+var lockLog = cfg.GetLogger("lock")
 
 func NewBackend(bucket string, flags *cfg.FlagStorage) (cloud StorageBackend, err error) {
 	if flags.Backend == nil {
@@ -206,6 +209,7 @@ func NewGoofys(ctx context.Context, bucketName string, flags *cfg.FlagStorage) (
 	}
 	if flags.DebugFuse {
 		fuseLog.Level = logrus.DebugLevel
+		lockLog.Level = logrus.DebugLevel
 	}
 	if flags.DebugS3 {
 		cfg.SetCloudLogLevel(logrus.DebugLevel)
@@ -360,11 +364,17 @@ func newGoofys(ctx context.Context, bucket string, flags *cfg.FlagStorage,
 
 	go fs.MetaEvictor()
 
+	if err := fs.locks.initFileLockManager(fs); err != nil {
+		return nil, err
+	}
+	fs.locks.Start(fs.shutdownCh)
+
 	return fs, nil
 }
 
 func (fs *Goofys) Shutdown() {
 	atomic.StoreInt32(&fs.shutdown, 1)
+	fs.locks.ReleaseAll()
 	close(fs.shutdownCh)
 	fs.WakeupFlusher()
 	if fs.diskFdQueue != nil {

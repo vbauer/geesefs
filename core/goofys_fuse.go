@@ -512,6 +512,13 @@ func (fs *GoofysFuse) OpenFile(
 
 	op.Handle = fs.AddFileHandle(fh)
 
+	err = fs.locks.OnOpen(in, openWantsWrite(uint32(op.OpenFlags)))
+	if err != nil {
+		fs.rollbackFileHandleOpen(op.Handle, fh)
+		err = mapAwsError(err)
+		return
+	}
+
 	// this flag appears to tell the kernel if this open should
 	// use the page cache or not. "use" here means:
 	//
@@ -812,6 +819,10 @@ func (fs *GoofysFuse) Unlink(
 		return syscall.ESTALE
 	}
 
+	if shouldHideLockSidecar(fs.flags, op.Name) {
+		return syscall.EACCES
+	}
+
 	err = parent.Unlink(op.Name)
 	err = mapAwsError(err)
 	return
@@ -834,7 +845,14 @@ func (fs *GoofysFuse) Rename(
 		return syscall.ESTALE
 	}
 
+	if err = fs.locks.CheckRename(parent, op.OldName, newParent, op.NewName); err != nil {
+		return mapAwsError(err)
+	}
+
 	err = parent.Rename(op.OldName, newParent, op.NewName)
+	if err == nil {
+		fs.locks.OnRename(parent, op.OldName)
+	}
 	err = mapAwsError(err)
 
 	return
@@ -866,6 +884,12 @@ func (fs *GoofysFuse) Fallocate(
 	}
 
 	inode.mu.Lock()
+
+	// Advisory lock: deny resize/zero/punch while another mount holds it.
+	if err = fs.locks.CheckMutate(inode); err != nil {
+		inode.mu.Unlock()
+		return err
+	}
 
 	modified := false
 

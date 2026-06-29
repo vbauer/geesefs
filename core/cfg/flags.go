@@ -32,6 +32,28 @@ import (
 
 const GEESEFS_VERSION = "0.43.8"
 
+// DefaultLockInclude restricts advisory locking to formats edited by desktop
+// applications that take single-writer locks (office suites, Visio/Project/Access,
+// and common creative/CAD tools). This keeps the lock check (and its S3 round-trip)
+// off the hot path for every other file. Pass --lock-include="" to lock all
+// non-excluded files, or override with a custom comma-separated glob list.
+const DefaultLockInclude = "*.doc,*.docx,*.docm,*.dot,*.dotx," + // Word
+	"*.xls,*.xlsx,*.xlsm,*.xlsb," + // Excel
+	"*.ppt,*.pptx,*.pptm," + // PowerPoint
+	"*.vsd,*.vsdx,*.vsdm," + // Visio
+	"*.mpp," + // Project
+	"*.accdb,*.mdb," + // Access
+	"*.pub," + // Publisher
+	"*.odt,*.ods,*.odp,*.odg,*.odf," + // OpenDocument
+	"*.rtf," + // Rich Text
+	"*.dwg," + // AutoCAD
+	"*.psd,*.ai,*.cdr" // Photoshop / Illustrator / CorelDRAW
+
+// DefaultLockExclude lists editor auxiliary files (MS Office temp & owner files)
+// that must never own a lock sidecar. These globs always apply, in addition to
+// any user-supplied --lock-exclude.
+const DefaultLockExclude = "~$*,*.sb-*,*~WR*"
+
 var flagCategories map[string]string
 
 // Set up custom help text for goofys; in particular the usage section.
@@ -148,6 +170,38 @@ MISC OPTIONS:
 		cli.BoolFlag{
 			Name:  "ignore-setting-attrs-for-root-dir-erros",
 			Usage: "Ignore changing attributes for root of geesefs (ex. 'touch ./mountpoint')",
+		},
+
+		cli.BoolFlag{
+			Name:  "enable-file-locks",
+			Usage: "Enable advisory file locking via S3 sidecar objects",
+		},
+
+		cli.BoolTFlag{
+			Name:  "hide-lock-sidecars",
+			Usage: "Hide .*.geesefs-lock sidecar files from directory listings and lookup (default: on)",
+		},
+
+		cli.DurationFlag{
+			Name:  "lock-ttl",
+			Value: 30 * time.Minute,
+			Usage: "TTL for advisory file locks; stale locks can be reacquired after expiry",
+		},
+
+		cli.StringFlag{
+			Name:  "lock-owner",
+			Usage: "Display name stored in lock sidecar (default: OS username)",
+		},
+
+		cli.StringFlag{
+			Name:  "lock-include",
+			Value: DefaultLockInclude,
+			Usage: "Comma-separated globs (basename) for files that may have lock sidecars; default = office formats. Pass an empty string to lock all non-excluded files",
+		},
+
+		cli.StringFlag{
+			Name:  "lock-exclude",
+			Usage: "Extra comma-separated globs to skip locking; Office defaults (~$*, *.sb-*, *~WR*) always apply",
 		},
 	}
 
@@ -842,6 +896,12 @@ func PopulateFlags(c *cli.Context) (ret *FlagStorage) {
 		Setgid:                             c.Int("setgid"),
 		WinRefreshDirs:                     c.Bool("refresh-dirs"),
 		IgnoreSettingAttrsForRootDirErrors: c.Bool("ignore-setting-attrs-for-root-dir-erros"),
+		EnableFileLocks:                    c.Bool("enable-file-locks"),
+		HideLockSidecars:                   c.Bool("hide-lock-sidecars"),
+		LockTTL:                            c.Duration("lock-ttl"),
+		LockOwner:                          c.String("lock-owner"),
+		LockInclude:                        c.String("lock-include"),
+		LockExclude:                        c.String("lock-exclude"),
 
 		// Tuning,
 		MemoryLimit:         uint64(1024 * 1024 * c.Int("memory-limit")),
@@ -1096,6 +1156,9 @@ func DefaultFlags() *FlagStorage {
 		MaxDiskCacheFD:      512,
 		RefreshFilename:     ".invalidate",
 		FlushFilename:       ".fsyncdir",
+		HideLockSidecars:    true,
+		LockTTL:             30 * time.Minute,
+		LockInclude:         DefaultLockInclude,
 		PartSizes: []PartSizeConfig{
 			{PartSize: 5 * 1024 * 1024, PartCount: 1000},
 			{PartSize: 25 * 1024 * 1024, PartCount: 1000},

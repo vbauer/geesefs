@@ -16,6 +16,7 @@
 package core
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -25,6 +26,13 @@ import (
 	"syscall"
 	"time"
 )
+
+// ErrPreconditionFailed is the backend-agnostic signal that a conditional PutBlob
+// (If-Match / If-None-Match) failed its precondition. Backends surface 412/409
+// differently (S3 returns a raw awserr 412; Azure maps to errno), so a backend that
+// would otherwise hide the precondition wraps its error with this sentinel, letting
+// callers detect it via errors.Is regardless of provider.
+var ErrPreconditionFailed = errors.New("conditional write precondition failed")
 
 type Capabilities struct {
 	MaxMultipartSize uint64

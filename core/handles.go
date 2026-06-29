@@ -109,6 +109,10 @@ type Inode struct {
 	fileHandles  int32
 	lastWriteEnd uint64
 
+	// Per-inode lock state (int32 atomics; readable from FUSE without inode.mu).
+	lockForeignBusy int32 // 1: another mount holds the sidecar; GetAttr strips write bits
+	lockFreeAt      int64 // unix-nanos until which the lock was last confirmed free (negative cache)
+
 	// cached/buffered data
 	CacheState     int32
 	dirtyQueueId   uint64
@@ -339,7 +343,16 @@ func (inode *Inode) InflateAttributes() (attr fuseops.InodeAttributes) {
 		attr.Nlink = 1
 	}
 
+	if inode.isLockForeignBusy() {
+		attr.Mode &^= modeWriteAll
+	}
+
 	return
+}
+
+// isLockForeignBusy reports whether another client holds the advisory lock on this inode.
+func (inode *Inode) isLockForeignBusy() bool {
+	return atomic.LoadInt32(&inode.lockForeignBusy) != lockFlagOff
 }
 
 func (inode *Inode) logFuse(op string, args ...interface{}) {

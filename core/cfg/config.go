@@ -112,6 +112,14 @@ type FlagStorage struct {
 	NoVerifySSL         bool
 	WinRefreshDirs      bool
 
+	// Advisory file locking (sidecar in S3)
+	EnableFileLocks  bool
+	HideLockSidecars bool
+	LockTTL          time.Duration
+	LockOwner        string
+	LockInclude      string // comma-separated globs on basename; default = office formats (DefaultLockInclude), empty = all non-excluded
+	LockExclude      string // extra exclude globs (built-in Office defaults always apply)
+
 	// Debugging
 	DebugMain  bool
 	DebugFuse  bool
