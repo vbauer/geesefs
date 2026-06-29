@@ -232,3 +232,29 @@ func TestManagerOnOpenMarksForeignReadOnly(t *testing.T) {
 		t.Fatalf("foreign-locked inode must have write bits stripped, got mode %o", attr.Mode)
 	}
 }
+
+// TestManagerCheckRenameForeign verifies a rename is denied when either the source
+// or the destination is locked by another mount, and allowed when both are free.
+func TestManagerCheckRenameForeign(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	b := newFakeLockBackend()
+	foreign := newTestStore(b, "sess-f", "ivan", "host-a", 30*time.Minute, &now)
+	mustAcquire(t, foreign, "report.docx")
+
+	fs := testLockFS(b, "sess-mine", "petr", "host-b", &now)
+	parent := NewInode(fs, nil, "")
+	parent.ToDir()
+
+	// Source held by another mount -> denied.
+	if err := fs.locks.CheckRename(parent, "report.docx", parent, "renamed.docx"); err != syscall.EACCES {
+		t.Fatalf("rename of foreign-locked source: want EACCES, got %v", err)
+	}
+	// Destination held by another mount -> denied.
+	if err := fs.locks.CheckRename(parent, "free.docx", parent, "report.docx"); err != syscall.EACCES {
+		t.Fatalf("rename onto foreign-locked destination: want EACCES, got %v", err)
+	}
+	// Both sides free -> allowed.
+	if err := fs.locks.CheckRename(parent, "free.docx", parent, "alsofree.docx"); err != nil {
+		t.Fatalf("rename of a free file: want nil, got %v", err)
+	}
+}

@@ -364,7 +364,7 @@ func (fs *GoofysWin) Rename(oldpath string, newpath string) (ret int) {
 		return mapWinError(err)
 	}
 
-	if err = fs.locks.CheckRename(newParent, newName); err != nil {
+	if err = fs.locks.CheckRename(parent, oldName, newParent, newName); err != nil {
 		return mapWinError(err)
 	}
 

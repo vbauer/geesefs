@@ -845,7 +845,7 @@ func (fs *GoofysFuse) Rename(
 		return syscall.ESTALE
 	}
 
-	if err = fs.locks.CheckRename(newParent, op.NewName); err != nil {
+	if err = fs.locks.CheckRename(parent, op.OldName, newParent, op.NewName); err != nil {
 		return mapAwsError(err)
 	}
 

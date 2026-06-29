@@ -376,16 +376,22 @@ func (m *FileLockManager) CheckMkDir(parent *Inode, name string) error {
 	return m.checkForeignLock(lockSubjectForChild(parent, name))
 }
 
-// CheckRename guards a rename: the destination must not be locked by another
-// client (consistent with CheckCreate), and renaming onto a hidden sidecar is denied.
-func (m *FileLockManager) CheckRename(newParent *Inode, newName string) error {
+// CheckRename guards a rename: neither the source nor the destination may be locked
+// by another mount (moving a file someone else holds, or clobbering one, is denied),
+// and renaming a hidden sidecar on either side is denied. A source we own ourselves
+// passes (checkForeignLock returns nil for keys in our own locks map); OnRename then
+// releases its old-key sidecar.
+func (m *FileLockManager) CheckRename(oldParent *Inode, oldName string, newParent *Inode, newName string) error {
 	if !m.enabled {
 		return nil
 	}
-	if isLockSidecarName(newName) {
+	if isLockSidecarName(oldName) || isLockSidecarName(newName) {
 		return syscall.EACCES
 	}
-	return m.checkForeignLock(lockSubjectForChild(newParent, newName))
+	if err := m.checkForeignLock(lockSubjectForChild(oldParent, oldName)); err != nil {
+		return err // source held by another mount
+	}
+	return m.checkForeignLock(lockSubjectForChild(newParent, newName)) // destination held by another mount
 }
 
 // OnRename runs after a successful rename. If we held the lock on the old key,
