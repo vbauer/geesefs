@@ -292,8 +292,15 @@ func derefEtag(e *string) string {
 	return ""
 }
 
+// isPreconditionFailed reports whether a PutBlob error is an If-Match/If-None-Match
+// precondition failure, across backends: the backend-agnostic sentinel
+// (ErrPreconditionFailed, wrapped e.g. by Azure) or a raw S3/GCS awserr HTTP 412.
 func isPreconditionFailed(err error) bool {
-	if reqErr, ok := err.(awserr.RequestFailure); ok {
+	if errors.Is(err, ErrPreconditionFailed) {
+		return true
+	}
+	var reqErr awserr.RequestFailure
+	if errors.As(err, &reqErr) {
 		return reqErr.StatusCode() == http.StatusPreconditionFailed
 	}
 	return false

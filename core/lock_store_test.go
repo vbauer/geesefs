@@ -260,6 +260,24 @@ func TestStoreTryCreate(t *testing.T) {
 	}
 }
 
+// TestIsPreconditionFailed checks the cross-backend 412 detection: a raw S3/GCS
+// awserr 412 and the backend-agnostic ErrPreconditionFailed sentinel (Azure-style)
+// both count; unrelated errors do not.
+func TestIsPreconditionFailed(t *testing.T) {
+	if !isPreconditionFailed(reqFail("PreconditionFailed", 412)) {
+		t.Fatal("awserr HTTP 412 must be detected (S3/GCS)")
+	}
+	if !isPreconditionFailed(fmt.Errorf("%w: condition not met", ErrPreconditionFailed)) {
+		t.Fatal("ErrPreconditionFailed sentinel must be detected (Azure-style)")
+	}
+	if isPreconditionFailed(reqFail("InternalError", 500)) {
+		t.Fatal("HTTP 500 must not be treated as a precondition failure")
+	}
+	if isPreconditionFailed(fmt.Errorf("unrelated error")) {
+		t.Fatal("an unrelated error must not be a precondition failure")
+	}
+}
+
 func TestStoreNilBackendIsTransient(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0).UTC()
 	s := &lockStore{backend: nil, ttl: time.Minute, now: func() time.Time { return now }}

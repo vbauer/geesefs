@@ -342,6 +342,24 @@ func (b *AZBlob) Init(key string) error {
 	return err
 }
 
+// isAzurePreconditionFailed reports whether an Azure error is a conditional-write
+// precondition failure: If-None-Match:* on an existing blob (BlobAlreadyExists) or
+// an If-Match mismatch (ConditionNotMet / TargetConditionNotMet).
+func isAzurePreconditionFailed(err error) bool {
+	stgErr, ok := err.(azblob.StorageError)
+	if !ok {
+		return false
+	}
+	switch stgErr.ServiceCode() {
+	case azblob.ServiceCodeConditionNotMet,
+		azblob.ServiceCodeBlobAlreadyExists,
+		azblob.ServiceCodeTargetConditionNotMet:
+		return true
+	default:
+		return false
+	}
+}
+
 func mapAZBError(err error) error {
 	if err == nil {
 		return nil
@@ -823,6 +841,12 @@ func (b *AZBlob) PutBlob(param *PutBlobInput) (*PutBlobOutput, error) {
 		},
 		azblob.Metadata(nilMetadata(param.Metadata)), azPutAccessConditions(param), azblob.AccessTierNone, azPutBlobTags(param), azblob.ClientProvidedKeyOptions{}, azblob.ImmutabilityPolicyOptions{})
 	if err != nil {
+		// Surface a conditional-write precondition failure uniformly so callers can
+		// detect it via errors.Is(err, ErrPreconditionFailed) (S3 returns a raw 412;
+		// Azure maps the same outcome to an errno that would otherwise hide it).
+		if (param.IfMatch != nil || param.IfNoneMatch != nil) && isAzurePreconditionFailed(err) {
+			return nil, fmt.Errorf("%w: %v", ErrPreconditionFailed, mapAZBError(err))
+		}
 		return nil, mapAZBError(err)
 	}
 
