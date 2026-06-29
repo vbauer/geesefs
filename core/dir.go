@@ -1140,6 +1140,11 @@ func (parent *Inode) getChildName(name string) string {
 }
 
 func (parent *Inode) Unlink(name string) (err error) {
+	// Advisory lock: deny removing a file another mount holds locked.
+	if err := parent.fs.locks.CheckUnlink(parent, name); err != nil {
+		return err
+	}
+
 	parent.mu.Lock()
 	defer parent.mu.Unlock()
 

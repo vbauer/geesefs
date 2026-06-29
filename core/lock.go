@@ -337,12 +337,32 @@ func (m *FileLockManager) CheckWrite(inode *Inode) error {
 	return syscall.EACCES
 }
 
+// CheckMutate guards content/metadata mutations (truncate, fallocate, chmod, ...)
+// on a lockable file. Unlike CheckWrite it does NOT acquire the lock: these ops can
+// run without an open handle (e.g. truncate(2) by path, with no FUSE Release to
+// trigger a release), so acquiring would leak the hold. It denies the mutation only
+// when another mount currently holds the lock; if we already own it, it is allowed.
+func (m *FileLockManager) CheckMutate(inode *Inode) error {
+	if !m.enabled || inode.isDir() {
+		return nil
+	}
+	return m.checkForeignLock(lockSubjectDataKey(inode))
+}
+
 func (m *FileLockManager) CheckCreate(parent *Inode, name string) error {
 	if !m.enabled {
 		return nil
 	}
 	if isLockSidecarName(name) {
 		return syscall.EACCES
+	}
+	return m.checkForeignLock(lockSubjectForChild(parent, name))
+}
+
+// CheckUnlink denies removing a file that another mount currently holds locked.
+func (m *FileLockManager) CheckUnlink(parent *Inode, name string) error {
+	if !m.enabled {
+		return nil
 	}
 	return m.checkForeignLock(lockSubjectForChild(parent, name))
 }

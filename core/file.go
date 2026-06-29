@@ -1898,6 +1898,11 @@ func (inode *Inode) SetAttributes(size *uint64, mode *os.FileMode,
 			inode.mu.Unlock()
 			return syscall.ENOENT
 		}
+		// Advisory lock: deny truncate/chmod/chown/utimes while another mount holds it.
+		if err := fs.locks.CheckMutate(inode); err != nil {
+			inode.mu.Unlock()
+			return err
+		}
 	}
 
 	modified := false

@@ -1,6 +1,7 @@
 package core
 
 import (
+	"syscall"
 	"testing"
 	"time"
 
@@ -104,5 +105,47 @@ func TestLockRecordStale(t *testing.T) {
 	rec := &lockRecord{ExpiresAt: "2000-01-01T00:00:00Z", Held: true}
 	if !fs.locks.store.expired(rec) {
 		t.Fatal("expected expired lock")
+	}
+}
+
+// TestCheckMutateUnlinkForeign verifies that mutations (truncate/fallocate/chmod)
+// and unlink are denied with EACCES while another mount holds the advisory lock,
+// and allowed on a free file.
+func TestCheckMutateUnlinkForeign(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	b := newFakeLockBackend()
+
+	// Another mount takes the lock on report.docx.
+	other := newTestStore(b, "sess-other", "ivan", "host-a", 30*time.Minute, &now)
+	mustAcquire(t, other, "report.docx")
+
+	// Our mount: locks enabled, store wired to the same in-memory backend.
+	fs := testGoofys(&cfg.FlagStorage{
+		EnableFileLocks: true,
+		LockTTL:         30 * time.Minute,
+		LockInclude:     cfg.DefaultLockInclude,
+	})
+	fs.locks.store.backend = b
+	fs.locks.store.id = lockIdentity{session: "sess-mine", owner: "petr", client: "host-b"}
+	fs.locks.store.now = func() time.Time { return now }
+
+	parent := NewInode(fs, nil, "")
+	parent.ToDir()
+	doc := NewInode(fs, parent, "report.docx")
+
+	if err := fs.locks.CheckMutate(doc); err != syscall.EACCES {
+		t.Fatalf("CheckMutate on foreign-locked file: want EACCES, got %v", err)
+	}
+	if err := fs.locks.CheckUnlink(parent, "report.docx"); err != syscall.EACCES {
+		t.Fatalf("CheckUnlink on foreign-locked file: want EACCES, got %v", err)
+	}
+
+	// A free file is unaffected.
+	free := NewInode(fs, parent, "free.docx")
+	if err := fs.locks.CheckMutate(free); err != nil {
+		t.Fatalf("CheckMutate on free file: want nil, got %v", err)
+	}
+	if err := fs.locks.CheckUnlink(parent, "free.docx"); err != nil {
+		t.Fatalf("CheckUnlink on free file: want nil, got %v", err)
 	}
 }

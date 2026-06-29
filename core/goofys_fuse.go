@@ -885,6 +885,12 @@ func (fs *GoofysFuse) Fallocate(
 
 	inode.mu.Lock()
 
+	// Advisory lock: deny resize/zero/punch while another mount holds it.
+	if err = fs.locks.CheckMutate(inode); err != nil {
+		inode.mu.Unlock()
+		return err
+	}
+
 	modified := false
 
 	if (op.Mode & (FALLOC_FL_COLLAPSE_RANGE | FALLOC_FL_INSERT_RANGE)) != 0 {
