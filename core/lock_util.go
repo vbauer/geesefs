@@ -50,21 +50,27 @@ func shouldLockDataKey(fs *Goofys, dataKey string) bool {
 	return true
 }
 
-func lockRecordBusy(rec *lockRecord, mySession string, expired func(*lockRecord) bool) bool {
+// lockRecordBusy reports whether rec is an active lock held by another mount.
+// expired is the caller's clock-injected expiry check (lockStore.expired); it is
+// passed in rather than read off the record so tests can drive the clock.
+func lockRecordBusy(rec *lockRecord, id lockIdentity, expired func(*lockRecord) bool) bool {
 	if rec == nil || !rec.Held || expired(rec) {
 		return false
 	}
-	return rec.Session != mySession
+	return rec.Session != id.session
 }
 
-func lockRecordReclaimable(rec *lockRecord, mySession, myOwner, myClient string, expired func(*lockRecord) bool) bool {
+// lockRecordReclaimable reports whether we may take rec over: it is free
+// (missing/released/expired), already ours (same session), or a same-host remount
+// (same owner+client). expired is the caller's clock-injected expiry check.
+func lockRecordReclaimable(rec *lockRecord, id lockIdentity, expired func(*lockRecord) bool) bool {
 	if rec == nil || !rec.Held || expired(rec) {
 		return true
 	}
-	if rec.Session == mySession {
+	if rec.Session == id.session {
 		return true
 	}
-	return rec.Owner == myOwner && rec.Client == myClient
+	return rec.Owner == id.owner && rec.Client == id.client
 }
 
 func shouldHideLockSidecar(flags *cfg.FlagStorage, name string) bool {

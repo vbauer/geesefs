@@ -83,11 +83,8 @@ func (s *lockStore) busyByOther(dataKey string) (busy bool, holder string, err e
 		}
 		return false, "", err // transient
 	}
-	if !rec.Held || s.expired(rec) {
-		return false, "", nil
-	}
-	if lockRecordReclaimable(rec, s.id.session, s.id.owner, s.id.client, s.expired) {
-		return false, "", nil
+	if lockRecordReclaimable(rec, s.id, s.expired) {
+		return false, "", nil // free, ours, expired, or same-host reclaimable
 	}
 	holder = rec.Owner
 	if holder == "" {
@@ -122,7 +119,7 @@ func (s *lockStore) tryAcquire(dataKey string) (lockAcquireResult, string, error
 	if rec.Session == s.id.session {
 		return lockAcquired, etag, nil // re-entry
 	}
-	if lockRecordReclaimable(rec, s.id.session, s.id.owner, s.id.client, s.expired) {
+	if lockRecordReclaimable(rec, s.id, s.expired) {
 		return s.put(cloud, lk, etag, true) // same-host remount
 	}
 	return lockBusy, "", nil

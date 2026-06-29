@@ -68,17 +68,17 @@ func TestLockRecordBusy(t *testing.T) {
 		Client:    "machine-a",
 		ExpiresAt: "2099-01-01T00:00:00Z",
 	}
-	if !lockRecordBusy(held, "session-b", expired) {
+	if !lockRecordBusy(held, lockIdentity{session: "session-b"}, expired) {
 		t.Fatal("different session must be busy")
 	}
-	if lockRecordBusy(held, "session-a", expired) {
+	if lockRecordBusy(held, lockIdentity{session: "session-a"}, expired) {
 		t.Fatal("same session must not be busy")
 	}
-	if lockRecordBusy(held, "session-b", func(*lockRecord) bool { return true }) {
+	if lockRecordBusy(held, lockIdentity{session: "session-b"}, func(*lockRecord) bool { return true }) {
 		t.Fatal("expired lock must not be busy")
 	}
 	// Same OS username on another machine — must still be busy.
-	if !lockRecordBusy(held, "session-b", expired) {
+	if !lockRecordBusy(held, lockIdentity{session: "session-b", owner: "vbauer", client: "machine-b"}, expired) {
 		t.Fatal("same owner different machine must be busy")
 	}
 }
@@ -91,13 +91,13 @@ func TestLockRecordReclaimable(t *testing.T) {
 		Owner:   "vbauer",
 		Client:  "machine-a",
 	}
-	if !lockRecordReclaimable(held, "new-session", "vbauer", "machine-a", expired) {
+	if !lockRecordReclaimable(held, lockIdentity{session: "new-session", owner: "vbauer", client: "machine-a"}, expired) {
 		t.Fatal("same host remount should reclaim")
 	}
-	if lockRecordReclaimable(held, "new-session", "vbauer", "machine-b", expired) {
+	if lockRecordReclaimable(held, lockIdentity{session: "new-session", owner: "vbauer", client: "machine-b"}, expired) {
 		t.Fatal("same owner different host must not reclaim")
 	}
-	if !lockRecordReclaimable(held, "old-session", "vbauer", "machine-b", expired) {
+	if !lockRecordReclaimable(held, lockIdentity{session: "old-session", owner: "vbauer", client: "machine-b"}, expired) {
 		t.Fatal("same session should reclaim")
 	}
 }
