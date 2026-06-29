@@ -74,7 +74,7 @@ func (f *fakeLockBackend) PutBlob(in *PutBlobInput) (*PutBlobOutput, error) {
 
 func newTestStore(b lockBackend, session, owner, client string, ttl time.Duration, clk *time.Time) *lockStore {
 	return &lockStore{
-		backend: func() lockBackend { return b },
+		backend: b,
 		id:      lockIdentity{session: session, owner: owner, client: client},
 		ttl:     ttl,
 		now:     func() time.Time { return *clk },
@@ -262,7 +262,7 @@ func TestStoreTryCreate(t *testing.T) {
 
 func TestStoreNilBackendIsTransient(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0).UTC()
-	s := &lockStore{backend: func() lockBackend { return nil }, ttl: time.Minute, now: func() time.Time { return now }}
+	s := &lockStore{backend: nil, ttl: time.Minute, now: func() time.Time { return now }}
 	if _, _, err := s.tryAcquire("doc.txt"); err == nil {
 		t.Fatal("nil backend must surface an error (treated as transient), not panic")
 	}

@@ -80,21 +80,18 @@ func (m *FileLockManager) initFileLockManager(fs *Goofys) error {
 	m.rules = *newLockRules(fs.flags)
 	m.enabled = fs.flags.EnableFileLocks
 	m.locks = make(map[string]*fileLock)
+	// The root cloud is set before initFileLockManager runs (newGoofys), so we can
+	// capture the backend directly rather than resolving it lazily on every call.
+	cloud, _ := fs.rootCloud()
 	m.store = &lockStore{
-		backend: func() lockBackend {
-			cloud, _ := fs.rootCloud()
-			if cloud == nil {
-				return nil
-			}
-			return cloud
-		},
-		ttl: fs.flags.LockTTL,
-		now: time.Now,
+		backend: cloud,
+		ttl:     fs.flags.LockTTL,
+		now:     time.Now,
 	}
 	if !m.enabled {
 		return nil
 	}
-	if cloud, _ := fs.rootCloud(); cloud != nil {
+	if cloud != nil {
 		if name := cloud.Capabilities().Name; lockUnsupportedBackend(name) {
 			return fmt.Errorf("--enable-file-locks is not supported on the %q backend: "+
 				"advisory locks need conditional writes (CAS), which it does not provide", name)

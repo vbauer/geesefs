@@ -44,7 +44,7 @@ type lockIdentity struct {
 }
 
 type lockStore struct {
-	backend func() lockBackend // resolved lazily; nil while the mount is not ready
+	backend lockBackend // the mount's storage backend; nil in pure-helper mode (locks off / tests)
 	id      lockIdentity
 	ttl     time.Duration
 	now     func() time.Time // injectable clock (tests)
@@ -61,22 +61,14 @@ func (s *lockStore) cloud() (lockBackend, error) {
 	if s.backend == nil {
 		return nil, errNoLockBackend
 	}
-	b := s.backend()
-	if b == nil {
-		return nil, errNoLockBackend
-	}
-	return b, nil
+	return s.backend, nil
 }
 
 // busyByOther reports whether another holder currently owns the lock on dataKey.
 // A missing/expired/released/corrupt sidecar, our own session, or a same-host
 // reclaimable record are all "not busy".
 func (s *lockStore) busyByOther(dataKey string) (busy bool, holder string, err error) {
-	cloud, err := s.cloud()
-	if err != nil {
-		return false, "", err
-	}
-	rec, _, err := s.readRecord(cloud, lockKey(dataKey))
+	rec, _, err := s.readRecord(lockKey(dataKey))
 	if err != nil {
 		if mapAwsError(err) == syscall.ENOENT || errors.Is(err, errBadRecord) {
 			return false, "", nil // no sidecar, or corrupt -> not busy
@@ -96,31 +88,27 @@ func (s *lockStore) busyByOther(dataKey string) (busy bool, holder string, err e
 // tryAcquire attempts to take the lock for dataKey. On success it returns the
 // new sidecar etag (needed for later heartbeat/release CAS).
 func (s *lockStore) tryAcquire(dataKey string) (lockAcquireResult, string, error) {
-	cloud, err := s.cloud()
-	if err != nil {
-		return lockBusy, "", err
-	}
 	lk := lockKey(dataKey)
 
-	rec, etag, err := s.readRecord(cloud, lk)
+	rec, etag, err := s.readRecord(lk)
 	if err != nil {
 		if mapAwsError(err) == syscall.ENOENT {
-			return s.create(cloud, lk) // no sidecar yet
+			return s.create(lk) // no sidecar yet
 		}
 		if errors.Is(err, errBadRecord) {
 			s3Log.Warnf("Invalid lock sidecar %v, treating as stale: %v", lk, err)
-			return s.put(cloud, lk, etag, true) // reclaim with known etag
+			return s.put(lk, etag, true) // reclaim with known etag
 		}
 		return lockBusy, "", err // transient
 	}
 	if !rec.Held || s.expired(rec) {
-		return s.put(cloud, lk, etag, true) // stale reclaim
+		return s.put(lk, etag, true) // stale reclaim
 	}
 	if rec.Session == s.id.session {
 		return lockAcquired, etag, nil // re-entry
 	}
 	if lockRecordReclaimable(rec, s.id, s.expired) {
-		return s.put(cloud, lk, etag, true) // same-host remount
+		return s.put(lk, etag, true) // same-host remount
 	}
 	return lockBusy, "", nil
 }
@@ -130,15 +118,15 @@ func (s *lockStore) tryAcquire(dataKey string) (lockAcquireResult, string, error
 // If-None-Match:* without a preceding GET. It returns (lockBusy, "", nil) when
 // the sidecar already exists, signalling the caller to fall back to tryAcquire.
 func (s *lockStore) tryCreate(dataKey string) (lockAcquireResult, string, error) {
+	return s.create(lockKey(dataKey))
+}
+
+// create writes the initial held sidecar with If-None-Match:* (first writer wins).
+func (s *lockStore) create(lk string) (lockAcquireResult, string, error) {
 	cloud, err := s.cloud()
 	if err != nil {
 		return lockBusy, "", err
 	}
-	return s.create(cloud, lockKey(dataKey))
-}
-
-// create writes the initial held sidecar with If-None-Match:* (first writer wins).
-func (s *lockStore) create(cloud lockBackend, lk string) (lockAcquireResult, string, error) {
 	body, err := s.newBody()
 	if err != nil {
 		return lockBusy, "", err
@@ -166,9 +154,12 @@ func (s *lockStore) create(cloud lockBackend, lk string) (lockAcquireResult, str
 // put writes a held or released record, using If-Match CAS when etag is known.
 // A 412 means we lost the race: for held that is lockBusy, for release that is
 // a benign no-op (someone already replaced the record).
-func (s *lockStore) put(cloud lockBackend, lk, etag string, held bool) (lockAcquireResult, string, error) {
+func (s *lockStore) put(lk, etag string, held bool) (lockAcquireResult, string, error) {
+	cloud, err := s.cloud()
+	if err != nil {
+		return lockBusy, "", err
+	}
 	var body []byte
-	var err error
 	if held {
 		body, err = s.newBody()
 	} else {
@@ -207,11 +198,7 @@ func (s *lockStore) put(cloud lockBackend, lk, etag string, held bool) (lockAcqu
 //   - (lockBusy, "", nil):       confirmed loss (reclaimed/released or 412) -> downgrade.
 //   - (_, _, err != nil):        transient error -> keep the hold, retry next tick.
 func (s *lockStore) renew(lk, etag string) (lockAcquireResult, string, error) {
-	cloud, err := s.cloud()
-	if err != nil {
-		return lockBusy, "", err
-	}
-	rec, cur, err := s.readRecord(cloud, lk)
+	rec, cur, err := s.readRecord(lk)
 	if err != nil {
 		if mapAwsError(err) == syscall.ENOENT {
 			return lockBusy, "", nil // sidecar gone -> lost
@@ -224,18 +211,14 @@ func (s *lockStore) renew(lk, etag string) (lockAcquireResult, string, error) {
 	if rec.Session != s.id.session || !rec.Held {
 		return lockBusy, "", nil // reclaimed or released by someone else
 	}
-	return s.put(cloud, lk, cur, true)
+	return s.put(lk, cur, true)
 }
 
 // release writes held:false if we still own the sidecar. We never DELETE so the
 // protocol works identically on versioned buckets (a delete marker would break
 // the next If-None-Match:* create).
 func (s *lockStore) release(lk string) error {
-	cloud, err := s.cloud()
-	if err != nil {
-		return err
-	}
-	rec, etag, err := s.readRecord(cloud, lk)
+	rec, etag, err := s.readRecord(lk)
 	if err != nil {
 		if mapAwsError(err) == syscall.ENOENT {
 			return nil // already gone
@@ -245,7 +228,7 @@ func (s *lockStore) release(lk string) error {
 	if rec.Session != s.id.session {
 		return nil // not ours; leave it
 	}
-	_, _, err = s.put(cloud, lk, etag, false)
+	_, _, err = s.put(lk, etag, false)
 	return err
 }
 
@@ -253,7 +236,11 @@ func (s *lockStore) release(lk string) error {
 // its etag. A 404 surfaces as an ENOENT error (caller maps it); a parse/version
 // problem surfaces as errBadRecord (with the etag still returned, so the caller
 // can reclaim a corrupt record via If-Match).
-func (s *lockStore) readRecord(cloud lockBackend, lk string) (*lockRecord, string, error) {
+func (s *lockStore) readRecord(lk string) (*lockRecord, string, error) {
+	cloud, err := s.cloud()
+	if err != nil {
+		return nil, "", err
+	}
 	resp, err := cloud.GetBlob(&GetBlobInput{Key: lk})
 	if err != nil {
 		return nil, "", err
