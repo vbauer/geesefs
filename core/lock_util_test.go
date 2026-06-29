@@ -117,7 +117,7 @@ func TestLockSubjectInode(t *testing.T) {
 	parent.ToDir()
 	doc := NewInode(fs, parent, "geesefs-test.docx")
 
-	if got := lockSubjectInode(fs, doc); got != doc {
+	if got := lockSubjectInode(doc); got != doc {
 		t.Fatal("lock subject inode should be itself")
 	}
 	if got := lockSubjectDataKey(doc); got != "geesefs-test.docx" {

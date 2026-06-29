@@ -141,12 +141,12 @@ func lockSubjectForChild(parent *Inode, name string) string {
 }
 
 // lockSubjectInode returns inode if it is a lock subject, else nil.
-func lockSubjectInode(fs *Goofys, inode *Inode) *Inode {
+func lockSubjectInode(inode *Inode) *Inode {
 	if inode == nil {
 		return nil
 	}
 	_, dataKey := inode.cloud()
-	if shouldLockDataKey(fs, dataKey) {
+	if shouldLockDataKey(inode.fs, dataKey) {
 		return inode
 	}
 	return nil

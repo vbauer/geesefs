@@ -367,7 +367,7 @@ func newGoofys(ctx context.Context, bucket string, flags *cfg.FlagStorage,
 	if err := fs.locks.initFileLockManager(fs); err != nil {
 		return nil, err
 	}
-	fs.locks.Start()
+	fs.locks.Start(fs.shutdownCh)
 
 	return fs, nil
 }

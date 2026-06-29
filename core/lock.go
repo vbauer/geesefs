@@ -58,9 +58,11 @@ type fileLock struct {
 }
 
 // FileLockManager holds path rules (include/exclude) and, when enabled,
-// coordinates advisory locks stored as S3 sidecar objects via lockStore.
+// coordinates advisory locks stored as S3 sidecar objects via lockStore. It does
+// not hold a *Goofys back-pointer: it reaches the backend through lockStore and
+// the include/exclude rules through m.rules; per-op it gets the fs via the
+// inode/parent passed into each hook.
 type FileLockManager struct {
-	fs      *Goofys
 	rules   lockRules
 	enabled bool
 	store   *lockStore
@@ -76,7 +78,6 @@ type FileLockManager struct {
 // !enabled. Returns an error when locking is enabled on a backend that cannot
 // support it (see lockUnsupportedBackend).
 func (m *FileLockManager) initFileLockManager(fs *Goofys) error {
-	m.fs = fs
 	m.rules = *newLockRules(fs.flags)
 	m.enabled = fs.flags.EnableFileLocks
 	m.locks = make(map[string]*fileLock)
@@ -180,7 +181,7 @@ func (m *FileLockManager) recentlyFree(inode *Inode) bool {
 // dropAndResolveInode removes any owned entry for dataKey and returns the inode
 // whose flags should be updated (prefers the stored subject inode).
 func (m *FileLockManager) dropAndResolveInode(dataKey string, inode *Inode) *Inode {
-	target := lockSubjectInode(m.fs, inode)
+	target := lockSubjectInode(inode)
 	if target == nil {
 		target = inode
 	}
@@ -235,7 +236,9 @@ func (m *FileLockManager) acquire(dataKey string, inode *Inode) (owned bool, tra
 // --- lifecycle ---
 
 // Start runs a single background heartbeat for all locks held by this mount.
-func (m *FileLockManager) Start() {
+// shutdownCh is the mount's shutdown signal (closed on Goofys.Shutdown); the
+// manager takes it as an argument rather than holding a *Goofys back-pointer.
+func (m *FileLockManager) Start(shutdownCh <-chan struct{}) {
 	if !m.enabled {
 		return
 	}
@@ -243,7 +246,7 @@ func (m *FileLockManager) Start() {
 	if interval < time.Minute {
 		interval = time.Minute
 	}
-	go m.heartbeatLoop(interval)
+	go m.heartbeatLoop(interval, shutdownCh)
 }
 
 func (m *FileLockManager) ReleaseAll() {
@@ -449,12 +452,12 @@ func (m *FileLockManager) releaseKeyAsync(dataKey string) {
 
 // --- heartbeat ---
 
-func (m *FileLockManager) heartbeatLoop(interval time.Duration) {
+func (m *FileLockManager) heartbeatLoop(interval time.Duration, shutdownCh <-chan struct{}) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {
-		case <-m.fs.shutdownCh:
+		case <-shutdownCh:
 			return
 		case <-ticker.C:
 			m.heartbeat()
