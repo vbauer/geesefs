@@ -819,7 +819,7 @@ func (fs *GoofysFuse) Unlink(
 		return syscall.ESTALE
 	}
 
-	if fs.flags.EnableFileLocks && shouldHideLockSidecar(fs.flags, op.Name) {
+	if shouldHideLockSidecar(fs.flags, op.Name) {
 		return syscall.EACCES
 	}
 

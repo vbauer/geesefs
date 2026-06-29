@@ -272,7 +272,7 @@ func (fs *GoofysWin) Unlink(path string) (ret int) {
 		return mapWinError(err)
 	}
 
-	if fs.flags.EnableFileLocks && shouldHideLockSidecar(fs.flags, child) {
+	if shouldHideLockSidecar(fs.flags, child) {
 		return mapWinError(syscall.EACCES)
 	}
 

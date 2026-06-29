@@ -63,6 +63,10 @@ func lockRecordReclaimable(rec *lockRecord, id lockIdentity, expired func(*lockR
 	return rec.Owner == id.owner && rec.Client == id.client
 }
 
+// shouldHideLockSidecar reports whether a sidecar object must be hidden from
+// listings/lookup and protected from unlink. Gated on HideLockSidecars only (NOT
+// EnableFileLocks), so listing and unlink agree: a hidden sidecar is also
+// undeletable, regardless of whether this mount has locking enabled.
 func shouldHideLockSidecar(flags *cfg.FlagStorage, name string) bool {
 	return flags.HideLockSidecars && isLockSidecarName(name)
 }

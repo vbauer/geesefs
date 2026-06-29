@@ -149,3 +149,86 @@ func TestCheckMutateUnlinkForeign(t *testing.T) {
 		t.Fatalf("CheckUnlink on free file: want nil, got %v", err)
 	}
 }
+
+// testLockFS builds a Goofys with file locks enabled whose lock store is wired to
+// the given in-memory backend and identity (so manager-level hooks can be tested
+// without a live bucket).
+func testLockFS(b *fakeLockBackend, session, owner, client string, now *time.Time) *Goofys {
+	fs := testGoofys(&cfg.FlagStorage{
+		EnableFileLocks: true,
+		LockTTL:         30 * time.Minute,
+		LockInclude:     cfg.DefaultLockInclude,
+	})
+	fs.locks.store.backend = b
+	fs.locks.store.id = lockIdentity{session: session, owner: owner, client: client}
+	fs.locks.store.now = func() time.Time { return *now }
+	return fs
+}
+
+func lockTestInode(fs *Goofys, name string) (*Inode, *Inode) {
+	parent := NewInode(fs, nil, "")
+	parent.ToDir()
+	return parent, NewInode(fs, parent, name)
+}
+
+// TestManagerCheckWriteAcquires verifies that the first write to a free lockable
+// file acquires the advisory lock and that another mount then sees it busy.
+func TestManagerCheckWriteAcquires(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	b := newFakeLockBackend()
+	fs := testLockFS(b, "sess-a", "ivan", "host-a", &now)
+	_, doc := lockTestInode(fs, "report.docx")
+
+	if err := fs.locks.CheckWrite(doc); err != nil {
+		t.Fatalf("CheckWrite on free file: want nil, got %v", err)
+	}
+	if !fs.locks.owns("report.docx") {
+		t.Fatal("CheckWrite must acquire the lock on a free file")
+	}
+	other := newTestStore(b, "sess-b", "petr", "host-b", 30*time.Minute, &now)
+	if busy, _, _ := other.busyByOther("report.docx"); !busy {
+		t.Fatal("another mount must see the just-acquired lock as busy")
+	}
+}
+
+// TestManagerCheckWriteForeignDenies verifies a write is denied with EACCES when
+// another mount already holds the lock.
+func TestManagerCheckWriteForeignDenies(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	b := newFakeLockBackend()
+	foreign := newTestStore(b, "sess-f", "ivan", "host-a", 30*time.Minute, &now)
+	mustAcquire(t, foreign, "report.docx")
+
+	fs := testLockFS(b, "sess-mine", "petr", "host-b", &now)
+	_, doc := lockTestInode(fs, "report.docx")
+
+	if err := fs.locks.CheckWrite(doc); err != syscall.EACCES {
+		t.Fatalf("CheckWrite on foreign-locked file: want EACCES, got %v", err)
+	}
+	if fs.locks.owns("report.docx") {
+		t.Fatal("must not own a lock held by another mount")
+	}
+}
+
+// TestManagerOnOpenMarksForeignReadOnly verifies a read-only open of a
+// foreign-locked file marks the inode read-only (GetAttr strips write bits).
+func TestManagerOnOpenMarksForeignReadOnly(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	b := newFakeLockBackend()
+	foreign := newTestStore(b, "sess-f", "ivan", "host-a", 30*time.Minute, &now)
+	mustAcquire(t, foreign, "report.docx")
+
+	fs := testLockFS(b, "sess-mine", "petr", "host-b", &now)
+	_, doc := lockTestInode(fs, "report.docx")
+	doc.Attributes.Mode = 0o644
+
+	if err := fs.locks.OnOpen(doc, false); err != nil {
+		t.Fatalf("OnOpen(read): unexpected error %v", err)
+	}
+	if !doc.isLockForeignBusy() {
+		t.Fatal("OnOpen on a foreign-locked file must mark the inode foreign-busy")
+	}
+	if attr := doc.InflateAttributes(); attr.Mode&modeWriteAll != 0 {
+		t.Fatalf("foreign-locked inode must have write bits stripped, got mode %o", attr.Mode)
+	}
+}

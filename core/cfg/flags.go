@@ -32,11 +32,22 @@ import (
 
 const GEESEFS_VERSION = "0.43.8"
 
-// DefaultLockInclude restricts advisory locking to the common editable office
-// document formats. This keeps the lock check (and its S3 round-trip) off the hot
-// path for every other file. Pass --lock-include="" to lock all non-excluded files
-// instead.
-const DefaultLockInclude = "*.doc,*.docx,*.docm,*.dot,*.dotx,*.xls,*.xlsx,*.xlsm,*.xlsb,*.ppt,*.pptx,*.pptm,*.odt,*.ods,*.odp,*.rtf"
+// DefaultLockInclude restricts advisory locking to formats edited by desktop
+// applications that take single-writer locks (office suites, Visio/Project/Access,
+// and common creative/CAD tools). This keeps the lock check (and its S3 round-trip)
+// off the hot path for every other file. Pass --lock-include="" to lock all
+// non-excluded files, or override with a custom comma-separated glob list.
+const DefaultLockInclude = "*.doc,*.docx,*.docm,*.dot,*.dotx," + // Word
+	"*.xls,*.xlsx,*.xlsm,*.xlsb," + // Excel
+	"*.ppt,*.pptx,*.pptm," + // PowerPoint
+	"*.vsd,*.vsdx,*.vsdm," + // Visio
+	"*.mpp," + // Project
+	"*.accdb,*.mdb," + // Access
+	"*.pub," + // Publisher
+	"*.odt,*.ods,*.odp,*.odg,*.odf," + // OpenDocument
+	"*.rtf," + // Rich Text
+	"*.dwg," + // AutoCAD
+	"*.psd,*.ai,*.cdr" // Photoshop / Illustrator / CorelDRAW
 
 // DefaultLockExclude lists editor auxiliary files (MS Office temp & owner files)
 // that must never own a lock sidecar. These globs always apply, in addition to

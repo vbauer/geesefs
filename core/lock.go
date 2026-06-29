@@ -310,8 +310,10 @@ func (m *FileLockManager) OnOpen(inode *Inode, writeIntent bool) error {
 	return nil
 }
 
-// CheckWrite is called on the write path (under inode.mu). It denies the write
-// when another mount holds the lock, and lazily acquires when free.
+// CheckWrite is called on the write path, BEFORE inode.mu is taken (a lazy acquire
+// may do an S3 round-trip, which must not block the inode). It is safe outside
+// inode.mu: it synchronizes on m.mu and the inode lock flags are atomics. It denies
+// the write when another mount holds the lock, and lazily acquires when free.
 func (m *FileLockManager) CheckWrite(inode *Inode) error {
 	if !m.enabled || inode.isDir() {
 		return nil

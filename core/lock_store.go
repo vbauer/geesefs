@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path"
 	"strings"
 	"syscall"
 	"time"
@@ -299,25 +300,12 @@ func isPreconditionFailed(err error) bool {
 }
 
 // dataKeyFromLockPath inverts lockKey: ".../.<base>.geesefs-lock" -> ".../<base>".
+// Returns lk unchanged if it is not a sidecar path. Splits off the directory and
+// delegates the actual name inversion to dataKeyFromLockSidecar (single source).
 func dataKeyFromLockPath(lk string) string {
-	dir, base := pathSplitLock(lk)
-	if !isLockSidecarName(base) {
-		return lk
+	dir, base := path.Split(lk)
+	if dataKey := dataKeyFromLockSidecar(strings.TrimSuffix(dir, "/"), base); dataKey != "" {
+		return dataKey
 	}
-	inner := strings.TrimSuffix(strings.TrimPrefix(base, "."), lockSidecarSuffix)
-	if dir != "" {
-		return dir + "/" + inner
-	}
-	return inner
-}
-
-func pathSplitLock(key string) (string, string) {
-	i := len(key) - 1
-	for i >= 0 && key[i] != '/' {
-		i--
-	}
-	if i < 0 {
-		return "", key
-	}
-	return key[:i], key[i+1:]
+	return lk
 }

@@ -172,16 +172,19 @@ func (fh *FileHandle) WriteFile(offset int64, data []byte, copyData bool) (err e
 		}
 	}
 
-	fh.inode.mu.Lock()
-
+	// Advisory lock check runs BEFORE taking inode.mu: a lazy acquire may do an S3
+	// round-trip, and we must not hold the inode lock across network I/O. CheckWrite
+	// is safe outside inode.mu - it synchronizes on the lock manager's own mutex and
+	// inode lock flags are atomics.
 	if err := fh.inode.fs.locks.CheckWrite(fh.inode); err != nil {
 		if fh.inode.fs.flags.UseEnomem {
 			// Undo the reservation above: negative size releases buffer pool quota.
 			fh.inode.fs.bufferPool.Use(-int64(len(data)), false)
 		}
-		fh.inode.mu.Unlock()
 		return err
 	}
+
+	fh.inode.mu.Lock()
 
 	if fh.inode.CacheState == ST_DELETED || fh.inode.CacheState == ST_DEAD {
 		// Oops, it's a deleted file. We don't support changing invisible files
