@@ -57,32 +57,6 @@ func TestShouldLockDataKeyInclude(t *testing.T) {
 	}
 }
 
-func TestLockRecordBusy(t *testing.T) {
-	expired := func(rec *lockRecord) bool {
-		return rec.ExpiresAt == "2000-01-01T00:00:00Z"
-	}
-	held := &lockRecord{
-		Held:      true,
-		Session:   "session-a",
-		Owner:     "vbauer",
-		Client:    "machine-a",
-		ExpiresAt: "2099-01-01T00:00:00Z",
-	}
-	if !lockRecordBusy(held, lockIdentity{session: "session-b"}, expired) {
-		t.Fatal("different session must be busy")
-	}
-	if lockRecordBusy(held, lockIdentity{session: "session-a"}, expired) {
-		t.Fatal("same session must not be busy")
-	}
-	if lockRecordBusy(held, lockIdentity{session: "session-b"}, func(*lockRecord) bool { return true }) {
-		t.Fatal("expired lock must not be busy")
-	}
-	// Same OS username on another machine — must still be busy.
-	if !lockRecordBusy(held, lockIdentity{session: "session-b", owner: "vbauer", client: "machine-b"}, expired) {
-		t.Fatal("same owner different machine must be busy")
-	}
-}
-
 func TestLockRecordReclaimable(t *testing.T) {
 	expired := func(rec *lockRecord) bool { return false }
 	held := &lockRecord{
@@ -128,7 +102,7 @@ func TestLockSubjectInode(t *testing.T) {
 func TestLockRecordStale(t *testing.T) {
 	fs := testGoofys(&cfg.FlagStorage{EnableFileLocks: true, LockTTL: 30 * time.Minute})
 	rec := &lockRecord{ExpiresAt: "2000-01-01T00:00:00Z", Held: true}
-	if !fs.locks.lockExpired(rec) {
+	if !fs.locks.store.expired(rec) {
 		t.Fatal("expected expired lock")
 	}
 }

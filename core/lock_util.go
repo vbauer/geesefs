@@ -50,16 +50,6 @@ func shouldLockDataKey(fs *Goofys, dataKey string) bool {
 	return true
 }
 
-// lockRecordBusy reports whether rec is an active lock held by another mount.
-// expired is the caller's clock-injected expiry check (lockStore.expired); it is
-// passed in rather than read off the record so tests can drive the clock.
-func lockRecordBusy(rec *lockRecord, id lockIdentity, expired func(*lockRecord) bool) bool {
-	if rec == nil || !rec.Held || expired(rec) {
-		return false
-	}
-	return rec.Session != id.session
-}
-
 // lockRecordReclaimable reports whether we may take rec over: it is free
 // (missing/released/expired), already ours (same session), or a same-host remount
 // (same owner+client). expired is the caller's clock-injected expiry check.

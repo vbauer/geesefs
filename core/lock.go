@@ -120,9 +120,6 @@ func lockUnsupportedBackend(name string) bool {
 func (m *FileLockManager) excluded(dataKey string) bool { return m.rules.excluded(dataKey) }
 func (m *FileLockManager) included(dataKey string) bool { return m.rules.included(dataKey) }
 
-// lockExpired is kept for tests and callers that already hold a record.
-func (m *FileLockManager) lockExpired(rec *lockRecord) bool { return m.store.expired(rec) }
-
 // --- state transitions (the only places inode flags are mutated) ---
 
 // markOwned records that we hold dataKey and mirrors it to the inode flags.
