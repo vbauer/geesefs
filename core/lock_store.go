@@ -8,15 +8,22 @@
 // (If-None-Match:* on create, If-Match:<etag> on update) — the CAS, not any
 // local map, is what makes "first writer wins".
 //
-// Round-trips: the sidecar is a tiny JSON object and GetBlob already returns the
-// ETag, so the protocol reads it with a single GET (no preceding HEAD). A 404
-// from the GET means "no sidecar"; a 200 yields both the record and the etag
-// needed for the next If-Match update.
+// Storage layout: each write puts the record BOTH as a canonical JSON body and as
+// base64(JSON) in user-metadata (key lockMetaKey), atomically in one PutBlob. Reads
+// go through a single HeadBlob — which returns the metadata + ETag without fetching
+// the body — and fall back to a GET only if the metadata is missing/stripped. On
+// Yandex S3 metadata lives in a fast DB while the body lives in storage, so the HEAD
+// hot path (busy-checks, heartbeat) avoids touching the slower storage layer. The
+// body remains the canonical, human-readable copy and the robustness fallback.
+//
+// Round-trips: HeadBlob is one request and already returns the ETag needed for the
+// next If-Match update. A 404 means "no sidecar".
 
 package core
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -30,9 +37,15 @@ import (
 	"github.com/aws/aws-sdk-go/aws/awserr"
 )
 
+// lockMetaKey is the user-metadata key holding base64(record JSON). Lowercase and
+// underscore-only: Azure Blob metadata keys must be valid C# identifiers (no
+// hyphens), and S3 lowercases keys — this form round-trips identically on both.
+const lockMetaKey = "geesefs_lock_record"
+
 // lockBackend is the narrow subset of StorageBackend the lock protocol needs.
 // StorageBackend satisfies it; tests provide an in-memory fake.
 type lockBackend interface {
+	HeadBlob(*HeadBlobInput) (*HeadBlobOutput, error)
 	GetBlob(*GetBlobInput) (*GetBlobOutput, error)
 	PutBlob(*PutBlobInput) (*PutBlobOutput, error)
 }
@@ -139,6 +152,7 @@ func (s *lockStore) create(lk string) (lockAcquireResult, string, error) {
 		Size:        PUInt64(uint64(len(body))),
 		ContentType: &ct,
 		IfNoneMatch: PString("*"),
+		Metadata:    lockMeta(body),
 		Tags:        map[string]string{"geesefs-lock": "true"},
 	})
 	if err != nil {
@@ -175,6 +189,7 @@ func (s *lockStore) put(lk, etag string, held bool) (lockAcquireResult, string, 
 		Body:        bytes.NewReader(body),
 		Size:        PUInt64(uint64(len(body))),
 		ContentType: &ct,
+		Metadata:    lockMeta(body),
 		Tags:        map[string]string{"geesefs-lock": "true"},
 	}
 	if etag != "" {
@@ -233,33 +248,68 @@ func (s *lockStore) release(lk string) error {
 	return err
 }
 
-// readRecord fetches and parses the sidecar with a single GET, also returning
-// its etag. A 404 surfaces as an ENOENT error (caller maps it); a parse/version
-// problem surfaces as errBadRecord (with the etag still returned, so the caller
-// can reclaim a corrupt record via If-Match).
+// readRecord fetches and parses the sidecar via a single HEAD (record carried in
+// user-metadata), returning its etag. It falls back to a GET of the JSON body only
+// when the metadata is absent/stripped (older/foreign sidecar, or a metadata-eating
+// proxy). A 404 surfaces as an ENOENT error (caller maps it); a parse/version
+// problem surfaces as errBadRecord (with the etag still returned, so the caller can
+// reclaim a corrupt record via If-Match).
 func (s *lockStore) readRecord(lk string) (*lockRecord, string, error) {
 	cloud, err := s.cloud()
 	if err != nil {
 		return nil, "", err
 	}
-	resp, err := cloud.GetBlob(&GetBlobInput{Key: lk})
+	head, err := cloud.HeadBlob(&HeadBlobInput{Key: lk})
 	if err != nil {
 		return nil, "", err
+	}
+	etag := derefEtag(head.ETag)
+	if enc, ok := head.Metadata[lockMetaKey]; ok && enc != nil {
+		if data, derr := base64.StdEncoding.DecodeString(*enc); derr == nil {
+			rec, perr := parseLockRecord(data)
+			return rec, etag, perr
+		}
+		// Malformed base64 in metadata: fall through to the canonical body.
+	}
+	return s.readRecordBody(cloud, lk, etag)
+}
+
+// readRecordBody is the GET fallback: read the canonical JSON body when the record
+// is not available from metadata.
+func (s *lockStore) readRecordBody(cloud lockBackend, lk, etag string) (*lockRecord, string, error) {
+	resp, err := cloud.GetBlob(&GetBlobInput{Key: lk})
+	if err != nil {
+		return nil, etag, err
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, "", err
+		return nil, etag, err
 	}
-	etag := derefEtag(resp.ETag)
+	if etag == "" {
+		etag = derefEtag(resp.ETag)
+	}
+	rec, perr := parseLockRecord(data)
+	return rec, etag, perr
+}
+
+// parseLockRecord unmarshals and version-checks a record; failures map to errBadRecord.
+func parseLockRecord(data []byte) (*lockRecord, error) {
 	var rec lockRecord
 	if err := json.Unmarshal(data, &rec); err != nil {
-		return nil, etag, fmt.Errorf("%w: %v", errBadRecord, err)
+		return nil, fmt.Errorf("%w: %v", errBadRecord, err)
 	}
 	if rec.Version != 1 {
-		return nil, etag, fmt.Errorf("%w: unsupported version %d", errBadRecord, rec.Version)
+		return nil, fmt.Errorf("%w: unsupported version %d", errBadRecord, rec.Version)
 	}
-	return &rec, etag, nil
+	return &rec, nil
+}
+
+// lockMeta builds the user-metadata carrying base64(record JSON), so a write lands
+// the same record in both the body and the metadata atomically (one PutBlob).
+func lockMeta(body []byte) map[string]*string {
+	enc := base64.StdEncoding.EncodeToString(body)
+	return map[string]*string{lockMetaKey: &enc}
 }
 
 func (s *lockStore) newBody() ([]byte, error) {

@@ -17,26 +17,46 @@ import (
 // expects from real S3. This lets us prove the CAS-based "first writer wins"
 // and reclaim/heartbeat logic without a live bucket.
 type fakeLockBackend struct {
-	mu   sync.Mutex
-	objs map[string][]byte
-	tags map[string]string
-	seq  int
-	gets int // round-trip counters (assert HEAD+GET collapse)
-	puts int
+	mu    sync.Mutex
+	objs  map[string][]byte
+	tags  map[string]string             // key -> etag
+	meta  map[string]map[string]*string // key -> user-metadata
+	seq   int
+	gets  int // round-trip counters
+	puts  int
+	heads int
 }
 
 func newFakeLockBackend() *fakeLockBackend {
-	return &fakeLockBackend{objs: map[string][]byte{}, tags: map[string]string{}}
+	return &fakeLockBackend{
+		objs: map[string][]byte{},
+		tags: map[string]string{},
+		meta: map[string]map[string]*string{},
+	}
 }
 
-func (f *fakeLockBackend) counts() (gets, puts int) {
+func (f *fakeLockBackend) counts() (gets, puts, heads int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.gets, f.puts
+	return f.gets, f.puts, f.heads
 }
 
 func reqFail(code string, status int) error {
 	return awserr.NewRequestFailure(awserr.New(code, code, nil), status, "test-req")
+}
+
+func (f *fakeLockBackend) HeadBlob(in *HeadBlobInput) (*HeadBlobOutput, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.heads++
+	etag, ok := f.tags[in.Key]
+	if !ok {
+		return nil, reqFail("NoSuchKey", 404)
+	}
+	out := &HeadBlobOutput{}
+	out.ETag = &etag
+	out.Metadata = f.meta[in.Key]
+	return out, nil
 }
 
 func (f *fakeLockBackend) GetBlob(in *GetBlobInput) (*GetBlobOutput, error) {
@@ -50,6 +70,7 @@ func (f *fakeLockBackend) GetBlob(in *GetBlobInput) (*GetBlobOutput, error) {
 	etag := f.tags[in.Key]
 	out := &GetBlobOutput{Body: io.NopCloser(bytes.NewReader(append([]byte(nil), body...)))}
 	out.ETag = &etag
+	out.Metadata = f.meta[in.Key]
 	return out, nil
 }
 
@@ -69,6 +90,7 @@ func (f *fakeLockBackend) PutBlob(in *PutBlobInput) (*PutBlobOutput, error) {
 	etag := fmt.Sprintf("etag-%d", f.seq)
 	f.objs[in.Key] = body
 	f.tags[in.Key] = etag
+	f.meta[in.Key] = in.Metadata
 	return &PutBlobOutput{ETag: &etag}, nil
 }
 
@@ -218,20 +240,53 @@ func TestStoreSingleRoundTrips(t *testing.T) {
 	a := newTestStore(b, "sess-a", "ivan", "host-a", 30*time.Minute, &now)
 	c := newTestStore(b, "sess-b", "petr", "host-b", 30*time.Minute, &now)
 
-	// First acquire on a free key: one GET (404) + one PUT (create). No HEAD.
+	// First acquire on a free key: one HEAD (404) + one PUT (create). No body GET.
 	mustAcquire(t, a, "doc.txt")
-	if g, p := b.counts(); g != 1 || p != 1 {
-		t.Fatalf("acquire on free key: want 1 GET + 1 PUT, got %d GET %d PUT", g, p)
+	if g, p, h := b.counts(); g != 0 || p != 1 || h != 1 {
+		t.Fatalf("acquire on free key: want 0 GET + 1 PUT + 1 HEAD, got %d GET %d PUT %d HEAD", g, p, h)
 	}
 
-	// busyByOther on an existing sidecar: a single GET (no preceding HEAD).
-	g0, p0 := b.counts()
+	// busyByOther on an existing sidecar: a single HEAD (record from metadata, no body).
+	g0, p0, h0 := b.counts()
 	if busy, _, _ := c.busyByOther("doc.txt"); !busy {
 		t.Fatal("expected busy")
 	}
-	g1, p1 := b.counts()
-	if g1-g0 != 1 || p1-p0 != 0 {
-		t.Fatalf("busyByOther: want +1 GET +0 PUT, got +%d GET +%d PUT", g1-g0, p1-p0)
+	g1, p1, h1 := b.counts()
+	if h1-h0 != 1 || g1-g0 != 0 || p1-p0 != 0 {
+		t.Fatalf("busyByOther: want +1 HEAD +0 GET +0 PUT, got +%d HEAD +%d GET +%d PUT", h1-h0, g1-g0, p1-p0)
+	}
+}
+
+// TestStoreReadsMetadataWithBodyFallback verifies the hybrid read: the record is
+// served from user-metadata via HEAD (no body GET), and if the metadata is stripped
+// the store falls back to the canonical JSON body.
+func TestStoreReadsMetadataWithBodyFallback(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	b := newFakeLockBackend()
+	a := newTestStore(b, "sess-a", "ivan", "host-a", 30*time.Minute, &now)
+	c := newTestStore(b, "sess-b", "petr", "host-b", 30*time.Minute, &now)
+	mustAcquire(t, a, "doc.txt")
+
+	// Fast path: record comes from metadata (HEAD), no body GET.
+	g0, _, _ := b.counts()
+	if busy, holder, _ := c.busyByOther("doc.txt"); !busy || holder != "ivan" {
+		t.Fatalf("metadata read: busy=%v holder=%q", busy, holder)
+	}
+	if g1, _, _ := b.counts(); g1 != g0 {
+		t.Fatalf("metadata read must not GET the body, got +%d body GETs", g1-g0)
+	}
+
+	// Simulate a metadata-stripping proxy: drop metadata, keep the canonical body.
+	b.mu.Lock()
+	delete(b.meta, lockKey("doc.txt"))
+	b.mu.Unlock()
+
+	g0, _, _ = b.counts()
+	if busy, holder, _ := c.busyByOther("doc.txt"); !busy || holder != "ivan" {
+		t.Fatalf("body fallback read: busy=%v holder=%q", busy, holder)
+	}
+	if g1, _, _ := b.counts(); g1 != g0+1 {
+		t.Fatalf("fallback must GET the body exactly once, got +%d", g1-g0)
 	}
 }
 
@@ -246,8 +301,8 @@ func TestStoreTryCreate(t *testing.T) {
 	if err != nil || res != lockAcquired || etag == "" {
 		t.Fatalf("tryCreate free: res=%v etag=%q err=%v", res, etag, err)
 	}
-	if g, p := b.counts(); g != 0 || p != 1 {
-		t.Fatalf("tryCreate free: want 0 GET + 1 PUT, got %d GET %d PUT", g, p)
+	if g, p, h := b.counts(); g != 0 || p != 1 || h != 0 {
+		t.Fatalf("tryCreate free: want 0 GET + 1 PUT + 0 HEAD, got %d GET %d PUT %d HEAD", g, p, h)
 	}
 
 	// Optimistic create when a sidecar already exists -> lockBusy (fall back signal).
