@@ -1240,7 +1240,7 @@ func (parent *Inode) CreateOrOpen(name string, open bool) (inode *Inode, fh *Fil
 
 	fs := parent.fs
 
-	if err := fs.locksCheckCreate(parent, name); err != nil {
+	if err := fs.locks.CheckCreate(parent, name); err != nil {
 		return nil, nil, err
 	}
 
@@ -1291,7 +1291,7 @@ func (parent *Inode) MkDir(
 
 	parent.logFuse("MkDir", name)
 
-	if err := parent.fs.locksCheckMkDir(parent, name); err != nil {
+	if err := parent.fs.locks.CheckMkDir(parent, name); err != nil {
 		return nil, err
 	}
 

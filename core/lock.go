@@ -1,6 +1,7 @@
 package core
 
 import (
+	"fmt"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -22,9 +23,9 @@ import (
 // State model (single source of truth):
 //   - "we own key K"        == K present in FileLockManager.locks (guarded by mu).
 //   - "another mount owns K" == inode.lockForeignBusy (ephemeral; re-derived from S3).
-//   - inode.lockInodeHeld / inode.lockForeignBusy are a DERIVED cache of the above,
-//     so GetAttr/CheckWrite can read lock-free. They are only ever mutated through
-//     markOwned / markForeign / markFree, which keep them in sync with the map.
+//   - inode.lockForeignBusy is a DERIVED cache of the above, so GetAttr can strip
+//     write bits lock-free. It is only ever mutated through markOwned / markForeign /
+//     markFree, which keep it in sync with the map.
 //   - File handles carry NO lock state.
 
 type lockRecord struct {
@@ -72,8 +73,9 @@ type FileLockManager struct {
 // initFileLockManager fills the manager in place (pointer receiver so the
 // embedded sync.Mutex is never copied). The store is always created so its pure
 // helpers are usable even when locking is disabled; FUSE hooks early-return on
-// !enabled.
-func (m *FileLockManager) initFileLockManager(fs *Goofys) {
+// !enabled. Returns an error when locking is enabled on a backend that cannot
+// support it (see lockUnsupportedBackend).
+func (m *FileLockManager) initFileLockManager(fs *Goofys) error {
 	m.fs = fs
 	m.rules = *newLockRules(fs.flags)
 	m.enabled = fs.flags.EnableFileLocks
@@ -90,7 +92,13 @@ func (m *FileLockManager) initFileLockManager(fs *Goofys) {
 		now: time.Now,
 	}
 	if !m.enabled {
-		return
+		return nil
+	}
+	if cloud, _ := fs.rootCloud(); cloud != nil {
+		if name := cloud.Capabilities().Name; lockUnsupportedBackend(name) {
+			return fmt.Errorf("--enable-file-locks is not supported on the %q backend: "+
+				"advisory locks need conditional writes (CAS), which it does not provide", name)
+		}
 	}
 	host, _ := os.Hostname()
 	m.store.id = lockIdentity{
@@ -100,6 +108,15 @@ func (m *FileLockManager) initFileLockManager(fs *Goofys) {
 	}
 	lockLog.Infof("file locks enabled owner=%q session=%v client=%q include=%q exclude=%q",
 		m.store.id.owner, m.store.id.session, m.store.id.client, fs.flags.LockInclude, fs.flags.LockExclude)
+	return nil
+}
+
+// lockUnsupportedBackend reports whether a backend (by Capabilities().Name) cannot
+// back advisory locks. ADL Gen2 ("adl2") writes via a non-atomic create+append+flush
+// and currently ignores If-Match/If-None-Match, so "first writer wins" cannot hold;
+// we refuse explicitly instead of silently providing no protection.
+func lockUnsupportedBackend(name string) bool {
+	return name == "adl2"
 }
 
 func (m *FileLockManager) excluded(dataKey string) bool { return m.rules.excluded(dataKey) }
@@ -128,7 +145,6 @@ func (m *FileLockManager) markOwned(dataKey string, inode *Inode, etag string) {
 	target := fl.inode
 	m.mu.Unlock()
 	if target != nil {
-		atomic.StoreInt32(&target.lockInodeHeld, lockFlagOn)
 		atomic.StoreInt32(&target.lockForeignBusy, lockFlagOff)
 		atomic.StoreInt64(&target.lockFreeAt, 0) // we own it now; invalidate negative cache
 	}
@@ -139,7 +155,6 @@ func (m *FileLockManager) markOwned(dataKey string, inode *Inode, etag string) {
 func (m *FileLockManager) markForeign(dataKey string, inode *Inode) {
 	target := m.dropAndResolveInode(dataKey, inode)
 	if target != nil {
-		atomic.StoreInt32(&target.lockInodeHeld, lockFlagOff)
 		atomic.StoreInt32(&target.lockForeignBusy, lockFlagOn)
 		atomic.StoreInt64(&target.lockFreeAt, 0) // not free; invalidate negative cache
 	}
@@ -150,7 +165,6 @@ func (m *FileLockManager) markForeign(dataKey string, inode *Inode) {
 func (m *FileLockManager) markFree(dataKey string, inode *Inode) {
 	target := m.dropAndResolveInode(dataKey, inode)
 	if target != nil {
-		atomic.StoreInt32(&target.lockInodeHeld, lockFlagOff)
 		atomic.StoreInt32(&target.lockForeignBusy, lockFlagOff)
 		atomic.StoreInt64(&target.lockFreeAt, m.store.now().UnixNano())
 	}
@@ -184,20 +198,17 @@ func (m *FileLockManager) dropAndResolveInode(dataKey string, inode *Inode) *Ino
 	return target
 }
 
-func (m *FileLockManager) owns(dataKey string) (etag string, ok bool) {
+func (m *FileLockManager) owns(dataKey string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if fl := m.locks[dataKey]; fl != nil {
-		return fl.etag, true
-	}
-	return "", false
+	return m.locks[dataKey] != nil
 }
 
 // acquire takes the lock for dataKey (or confirms re-entry) and records the
 // result. owned=true means we hold it afterwards; transient=true means an S3
 // error left the outcome unknown (caller should not latch read-only).
 func (m *FileLockManager) acquire(dataKey string, inode *Inode) (owned bool, transient bool) {
-	if _, ok := m.owns(dataKey); ok {
+	if m.owns(dataKey) {
 		m.markOwned(dataKey, inode, "") // refresh inode flags on re-open
 		return true, false
 	}
@@ -231,7 +242,7 @@ func (m *FileLockManager) Start() {
 	if !m.enabled {
 		return
 	}
-	interval := m.fs.flags.LockTTL / 3
+	interval := m.store.ttl / 3
 	if interval < time.Minute {
 		interval = time.Minute
 	}
@@ -277,7 +288,7 @@ func (m *FileLockManager) OnOpen(inode *Inode, writeIntent bool) error {
 	}
 
 	// Read-only open: only detect foreign locks, to surface read-only attrs.
-	if _, ok := m.owns(dataKey); ok {
+	if m.owns(dataKey) {
 		m.markOwned(dataKey, inode, "")
 		return nil
 	}
@@ -312,7 +323,7 @@ func (m *FileLockManager) CheckWrite(inode *Inode) error {
 	if dataKey == "" {
 		return nil
 	}
-	if _, ok := m.owns(dataKey); ok {
+	if m.owns(dataKey) {
 		return nil
 	}
 	owned, transient := m.acquire(dataKey, inode)
@@ -370,7 +381,7 @@ func (m *FileLockManager) OnRename(oldParent *Inode, oldName string) {
 	if oldKey == "" {
 		return
 	}
-	if _, ok := m.owns(oldKey); !ok {
+	if !m.owns(oldKey) {
 		return
 	}
 	m.markFree(oldKey, nil) // clears map + inode flags (uses stored inode)
@@ -382,7 +393,7 @@ func (m *FileLockManager) checkForeignLock(dataKey string) error {
 	if dataKey == "" {
 		return nil
 	}
-	if _, ok := m.owns(dataKey); ok {
+	if m.owns(dataKey) {
 		return nil
 	}
 	busy, holder, err := m.store.busyByOther(dataKey)
@@ -406,7 +417,7 @@ func (m *FileLockManager) OnInodeClosed(inode *Inode) {
 	if !shouldLockDataKey(inode.fs, ownKey) {
 		return
 	}
-	if _, ok := m.owns(ownKey); !ok {
+	if !m.owns(ownKey) {
 		return
 	}
 	if atomic.LoadInt32(&inode.fileHandles) > 0 {
@@ -421,7 +432,7 @@ func (m *FileLockManager) finalizeRelease(inode *Inode, dataKey string) {
 		lockLog.Debugf("finalizeRelease %v: skipped, handles reopened", dataKey)
 		return
 	}
-	if _, ok := m.owns(dataKey); !ok {
+	if !m.owns(dataKey) {
 		return
 	}
 	m.markFree(dataKey, inode)
@@ -444,7 +455,7 @@ func (m *FileLockManager) releaseKeyAsync(dataKey string) {
 func (m *FileLockManager) heartbeatLoop(interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-	for atomic.LoadInt32(&m.fs.shutdown) == 0 {
+	for {
 		select {
 		case <-m.fs.shutdownCh:
 			return
@@ -490,30 +501,6 @@ func (fs *Goofys) rollbackFileHandleOpen(handle fuseops.HandleID, fh *FileHandle
 	delete(fs.fileHandles, handle)
 	fs.mu.Unlock()
 	fh.Release()
-}
-
-func (fs *Goofys) locksCheckWrite(inode *Inode) error {
-	return fs.locks.CheckWrite(inode)
-}
-
-func (fs *Goofys) locksOnOpen(inode *Inode, writeIntent bool) error {
-	return fs.locks.OnOpen(inode, writeIntent)
-}
-
-func (fs *Goofys) locksCheckCreate(parent *Inode, name string) error {
-	return fs.locks.CheckCreate(parent, name)
-}
-
-func (fs *Goofys) locksCheckMkDir(parent *Inode, name string) error {
-	return fs.locks.CheckMkDir(parent, name)
-}
-
-func (fs *Goofys) locksCheckRename(newParent *Inode, newName string) error {
-	return fs.locks.CheckRename(newParent, newName)
-}
-
-func (fs *Goofys) locksOnRename(oldParent *Inode, oldName string) {
-	fs.locks.OnRename(oldParent, oldName)
 }
 
 func (fs *Goofys) rootCloud() (StorageBackend, string) {

@@ -512,7 +512,7 @@ func (fs *GoofysFuse) OpenFile(
 
 	op.Handle = fs.AddFileHandle(fh)
 
-	err = fs.locksOnOpen(in, openWantsWrite(uint32(op.OpenFlags)))
+	err = fs.locks.OnOpen(in, openWantsWrite(uint32(op.OpenFlags)))
 	if err != nil {
 		fs.rollbackFileHandleOpen(op.Handle, fh)
 		err = mapAwsError(err)
@@ -845,13 +845,13 @@ func (fs *GoofysFuse) Rename(
 		return syscall.ESTALE
 	}
 
-	if err = fs.locksCheckRename(newParent, op.NewName); err != nil {
+	if err = fs.locks.CheckRename(newParent, op.NewName); err != nil {
 		return mapAwsError(err)
 	}
 
 	err = parent.Rename(op.OldName, newParent, op.NewName)
 	if err == nil {
-		fs.locksOnRename(parent, op.OldName)
+		fs.locks.OnRename(parent, op.OldName)
 	}
 	err = mapAwsError(err)
 

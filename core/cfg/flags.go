@@ -32,10 +32,10 @@ import (
 
 const GEESEFS_VERSION = "0.43.8"
 
-// DefaultLockInclude restricts advisory locking to the editable office document
-// formats MDS-27580 targets. This keeps the lock check (and its S3 round-trip)
-// off the hot path for every other file. Pass --lock-include="" to lock all
-// non-excluded files instead.
+// DefaultLockInclude restricts advisory locking to the common editable office
+// document formats. This keeps the lock check (and its S3 round-trip) off the hot
+// path for every other file. Pass --lock-include="" to lock all non-excluded files
+// instead.
 const DefaultLockInclude = "*.doc,*.docx,*.docm,*.dot,*.dotx,*.xls,*.xlsx,*.xlsm,*.xlsb,*.ppt,*.pptx,*.pptm,*.odt,*.ods,*.odp,*.rtf"
 
 // DefaultLockExclude lists editor auxiliary files (MS Office temp & owner files)

@@ -110,7 +110,6 @@ type Inode struct {
 	lastWriteEnd uint64
 
 	// Per-inode lock state (int32 atomics; readable from FUSE without inode.mu).
-	lockInodeHeld   int32 // 1: this mount holds the S3 sidecar for this file (held map + heartbeat)
 	lockForeignBusy int32 // 1: another mount holds the sidecar; GetAttr strips write bits
 	lockFreeAt      int64 // unix-nanos until which the lock was last confirmed free (negative cache)
 

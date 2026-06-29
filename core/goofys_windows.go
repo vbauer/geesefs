@@ -364,13 +364,13 @@ func (fs *GoofysWin) Rename(oldpath string, newpath string) (ret int) {
 		return mapWinError(err)
 	}
 
-	if err = fs.locksCheckRename(newParent, newName); err != nil {
+	if err = fs.locks.CheckRename(newParent, newName); err != nil {
 		return mapWinError(err)
 	}
 
 	err = parent.Rename(oldName, newParent, newName)
 	if err == nil {
-		fs.locksOnRename(parent, oldName)
+		fs.locks.OnRename(parent, oldName)
 	}
 
 	return mapWinError(err)
@@ -489,7 +489,7 @@ func (fs *GoofysWin) Create(path string, flags int, mode uint32) (ret int, fhId 
 
 	handleID := fs.AddFileHandle(fh)
 
-	err = fs.locksOnOpen(inode, openWantsWrite(uint32(flags)))
+	err = fs.locks.OnOpen(inode, openWantsWrite(uint32(flags)))
 	if err != nil {
 		fs.rollbackFileHandleOpen(fuseops.HandleID(handleID), fh)
 		return mapWinError(err), 0
@@ -551,7 +551,7 @@ func (fs *GoofysWin) Open(path string, flags int) (ret int, fhId uint64) {
 
 	handleID := fs.AddFileHandle(fh)
 
-	err = fs.locksOnOpen(inode, openWantsWrite(uint32(flags)))
+	err = fs.locks.OnOpen(inode, openWantsWrite(uint32(flags)))
 	if err != nil {
 		fs.rollbackFileHandleOpen(fuseops.HandleID(handleID), fh)
 		return mapWinError(err), 0

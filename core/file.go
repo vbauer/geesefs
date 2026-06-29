@@ -174,7 +174,7 @@ func (fh *FileHandle) WriteFile(offset int64, data []byte, copyData bool) (err e
 
 	fh.inode.mu.Lock()
 
-	if err := fh.inode.fs.locksCheckWrite(fh.inode); err != nil {
+	if err := fh.inode.fs.locks.CheckWrite(fh.inode); err != nil {
 		if fh.inode.fs.flags.UseEnomem {
 			// Undo the reservation above: negative size releases buffer pool quota.
 			fh.inode.fs.bufferPool.Use(-int64(len(data)), false)

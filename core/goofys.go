@@ -364,7 +364,9 @@ func newGoofys(ctx context.Context, bucket string, flags *cfg.FlagStorage,
 
 	go fs.MetaEvictor()
 
-	fs.locks.initFileLockManager(fs)
+	if err := fs.locks.initFileLockManager(fs); err != nil {
+		return nil, err
+	}
 	fs.locks.Start()
 
 	return fs, nil
