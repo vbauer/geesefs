@@ -30,12 +30,6 @@ jobs:
         go-version: '1.25'
         cache-dependency-path: go.sum
 
-    - name: Set up Java
-      uses: actions/setup-java@v4
-      with:
-        distribution: temurin
-        java-version: '17'
-
     - name: Cache s3proxy
       uses: actions/cache@v4
       with:
