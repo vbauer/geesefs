@@ -46,16 +46,22 @@ jobs:
           xfstests-${{ runner.os }}-
 
     - name: Build
-      run: env CGO_ENABLED=0 go build -o geesefs -v .
+      shell: bash
+      env:
+        CGO_ENABLED: "0"
+      run: go build -o geesefs -v .
 
     - name: Run tests
+      shell: bash
       env:
+        CGO_ENABLED: "0"
         SAME_PROCESS_MOUNT: "1"
       run: make run-test
       timeout-minutes: 12
 
     - name: Run xfstests
       if: matrix.os == 'ubuntu-latest'
+      shell: bash
       run: make run-xfstests
       timeout-minutes: 10
 
