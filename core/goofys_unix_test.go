@@ -44,6 +44,9 @@ import (
 )
 
 func (s *GoofysTest) mountCommon(t *C, mountPoint string, sameProc bool) {
+	if hasEnv("SKIP_FUSE_TESTS") {
+		t.Skip("FUSE mount tests disabled")
+	}
 	err := os.MkdirAll(mountPoint, 0700)
 	if err == syscall.EEXIST {
 		err = nil

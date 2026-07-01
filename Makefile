@@ -1,10 +1,10 @@
 export CGO_ENABLED=0
 
 run-test: s3proxy.jar
-	./test/run-tests.sh
+	bash ./test/run-tests.sh
 
 run-xfstests: s3proxy.jar xfstests
-	./test/run-xfstests.sh
+	bash ./test/run-xfstests.sh
 
 .PHONY: xfstests
 xfstests:

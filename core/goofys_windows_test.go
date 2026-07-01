@@ -35,6 +35,9 @@ func (s *GoofysTest) SetUpSuite(t *C) {
 }
 
 func (s *GoofysTest) mountCommon(t *C, mountPoint string, sameProc bool) {
+	if hasEnv("SKIP_FUSE_TESTS") {
+		t.Skip("FUSE mount tests disabled")
+	}
 	os.Remove(mountPoint)
 	s.fs.flags.MountPoint = mountPoint
 	mfs, err := mountFuseFS(s.fs)
