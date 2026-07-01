@@ -1,10 +1,10 @@
 export CGO_ENABLED=0
 
 run-test: s3proxy.jar
-	./test/run-tests.sh
+	bash ./test/run-tests.sh
 
 run-xfstests: s3proxy.jar xfstests
-	./test/run-xfstests.sh
+	bash ./test/run-xfstests.sh
 
 .PHONY: xfstests
 xfstests:
@@ -14,7 +14,7 @@ xfstests:
 	fi
 
 s3proxy.jar:
-	@if [ ! -f s3proxy.jar ]; then wget --tries=3 --timeout=60 https://github.com/gaul/s3proxy/releases/download/s3proxy-1.8.0/s3proxy -O s3proxy.jar; fi
+	@if [ ! -f s3proxy.jar ]; then curl -fsSL --retry 3 --connect-timeout 60 -o s3proxy.jar https://github.com/gaul/s3proxy/releases/download/s3proxy-1.8.0/s3proxy; fi
 
 get-deps: s3proxy.jar
 	go get -t ./...
